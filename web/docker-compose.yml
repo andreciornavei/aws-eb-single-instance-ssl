@@ -1,0 +1,22 @@
+services:
+
+  app:
+    container_name: app
+    build: ./app
+    environment:
+      - APP_NAME=${APP_NAME}
+      - APP_VERSION=${APP_VERSION}
+
+  nginx:
+    container_name: nginx
+    restart: unless-stopped
+    build: ./nginx
+    environment:
+      - CERT_EMAIL=${CERT_EMAIL}
+      - CERT_DOMAIN=${CERT_DOMAIN}
+      - CERT_BUCKET=${CERT_BUCKET}
+    ports:
+      - 80:80
+      - 443:443
+    depends_on:
+      - app

@@ -1,0 +1,132 @@
+service: ${env:APP_NAME}
+
+useDotenv: true
+
+plugins:
+  - serverless-dotenv-plugin
+
+params:
+  default:
+    DOMAIN: ${env:DOMAIN}
+    SUBDOMAIN: ${env:SUBDOMAIN}.${env:DOMAIN}
+    APP_NAME: ${env:APP_NAME}
+    APP_VERSION: ${env:APP_VERSION}
+    CERT_EMAIL: ${env:EMAIL}
+    CERT_BUCKET: ${env:DOMAIN}-${self:provider.stage}-certs
+    HOSTED_ZONE_ID: ${env:HOSTED_ZONE_ID}
+    AWS_S3_DEPLOY: ${env:AWS_S3_DEPLOY}
+
+provider:
+  name: aws
+  stage: ${opt:stage, 'development'}
+  region: ${opt:region, 'sa-east-1'}
+
+resources:
+  Resources:
+    BucketCerts:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${param:CERT_BUCKET}
+        LifecycleConfiguration:
+          Rules:
+            - Id: CertRetentionRule
+              Status: Enabled
+              ExpirationInDays: 90
+    Bucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${param:AWS_S3_DEPLOY}
+    BeanstalkApplication:
+      Type: AWS::ElasticBeanstalk::Application
+      Properties:
+        ApplicationName: ${param:APP_NAME}-application
+        Description: ${param:APP_NAME}-application
+    BeanstalkEnv:
+      Type: AWS::ElasticBeanstalk::Environment
+      DependsOn:
+        - BeanstalkApplication
+      Properties:
+        ApplicationName:
+          Ref: BeanstalkApplication
+        EnvironmentName: ${param:APP_NAME}-${self:provider.stage}
+        Description: Example ssl API ${self:provider.stage} Env
+        SolutionStackName: "64bit Amazon Linux 2 v3.5.8 running Docker"
+        Tier:
+          Name: WebServer
+          Type: Standard
+          Version: " "
+        OptionSettings:
+          # Instance configuration for environment
+          - Namespace: aws:elasticbeanstalk:environment
+            OptionName: EnvironmentType
+            Value: SingleInstance
+          - Namespace: aws:ec2:instances
+            OptionName: InstanceTypes
+            Value: t2.micro
+          - Namespace: aws:autoscaling:launchconfiguration
+            OptionName: IamInstanceProfile
+            Value: !Ref ElasticBeanstalkInstanceProfile
+          # CERT_DOMAIN for certbot domain generation
+          - Namespace: aws:elasticbeanstalk:application:environment
+            OptionName: CERT_DOMAIN
+            Value: ${param:SUBDOMAIN}
+          # CERT_EMAIL where certbot will send mail notifications
+          - Namespace: aws:elasticbeanstalk:application:environment
+            OptionName: CERT_EMAIL
+            Value: ${param:CERT_EMAIL}
+          # CERT_BUCKET where certbot will send mail notifications
+          - Namespace: aws:elasticbeanstalk:application:environment
+            OptionName: CERT_BUCKET
+            Value: ${param:CERT_BUCKET}
+          # define other application environments
+          - Namespace: aws:elasticbeanstalk:application:environment
+            OptionName: APP_NAME
+            Value: ${param:APP_NAME}
+          - Namespace: aws:elasticbeanstalk:application:environment
+            OptionName: APP_VERSION
+            Value: ${param:APP_VERSION}
+        Tags:
+          - Key: environment
+            Value: ${self:provider.stage}
+    ElasticBeanstalkInstanceProfile:
+      Type: AWS::IAM::InstanceProfile
+      Properties:
+        Path: "/"
+        Roles:
+          - !Ref ElasticBeanstalkEc2AssumeRole
+    ElasticBeanstalkEc2AssumeRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: ec2.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: S3UploadsCertsPermission-${param:APP_NAME}-${self:provider.stage}
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:PutObject
+                    - s3:GetObject
+                  Resource: !Join
+                    - "/"
+                    - - !GetAtt BucketCerts.Arn
+                      - "*"
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
+          - arn:aws:iam::aws:policy/AWSElasticBeanstalkWorkerTier
+          - arn:aws:iam::aws:policy/AWSElasticBeanstalkMulticontainerDocker
+    PrimaryRoute53Record:
+      Type: AWS::Route53::RecordSet
+      Properties:
+        Type: A
+        Name: ${param:SUBDOMAIN}
+        HostedZoneId: ${param:HOSTED_ZONE_ID}
+        TTL: 300
+        ResourceRecords:
+          - !GetAtt BeanstalkEnv.EndpointURL

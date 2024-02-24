@@ -1,0 +1,66 @@
+image: docker:latest
+
+services:
+  - docker:19.03-dind
+
+variables:
+  DOCKER_TLS_CERTDIR: ""
+  # workspace
+  DOMAIN: $DOMAIN
+  SUBDOMAIN: $SUBDOMAIN
+  APP_NAME: $APP_NAME
+  HOSTED_ZONE_ID: $HOSTED_ZONE_ID
+  AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+  AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+  AWS_DEFAULT_REGION: $AWS_DEFAULT_REGION
+
+# <!-- run function definition before all steps and define vars
+before_script:
+  # <!-- creation version control variables -->
+  - HASH=${CI_COMMIT_SHA:0:8}
+  - FILENAME="${APP_NAME}-${HASH}-build-${CI_PIPELINE_ID}"
+  - AWS_S3_DEPLOY=${SUBDOMAIN}-${DOMAIN}-${CI_COMMIT_BRANCH}-awseb-deployment-version
+  # <!-- export aws credentials to handle connection -->
+  - export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+  - export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+
+stages:
+  - deploy
+
+deploy:
+  stage: deploy
+  environment:
+    name: $CI_COMMIT_BRANCH
+  script:
+    - apk add --update nodejs npm jq zip aws-cli
+    - aws --version
+
+    # <!-- mount serverless environment variables -->
+    - echo "EMAIL=${EMAIL}" >> .env
+    - echo "DOMAIN=${DOMAIN}" >> .env
+    - echo "SUBDOMAIN=${SUBDOMAIN}" >> .env
+    - echo "APP_NAME=${APP_NAME}" >> .env
+    - echo "APP_VERSION=${FILENAME}" >> .env
+    - echo "AWS_S3_DEPLOY=${AWS_S3_DEPLOY}" >> .env
+    - echo "HOSTED_ZONE_ID=${HOSTED_ZONE_ID}" >> .env
+
+    # <!-- build aws infrastructure with serverless -->
+    - npm -g install serverless
+    - serverless plugin install -n serverless-dotenv-plugin
+    - serverless deploy --config serverless.yml --stage ${CI_COMMIT_BRANCH} --region ${AWS_DEFAULT_REGION} --verbose
+
+    # <!-- move to web folder and zip web content -->
+    - cd web
+    - ENV_NAME=${APP_NAME}-${CI_COMMIT_BRANCH}
+    - ZIPFILE=$FILENAME.zip
+    - rm -f $ZIPFILE
+    - zip -r $ZIPFILE .
+
+    # <!-- upload app version -->
+    - aws s3 cp ${ZIPFILE} s3://${AWS_S3_DEPLOY}/
+
+    # <!-- deploy app version -->
+    - aws elasticbeanstalk create-application-version --application-name ${APP_NAME}-application --version-label ${FILENAME} --source-bundle S3Bucket=${AWS_S3_DEPLOY},S3Key=${ZIPFILE}
+    - aws elasticbeanstalk update-environment --environment-name ${ENV_NAME} --version-label ${FILENAME}
+  rules:
+    - if: $CI_COMMIT_BRANCH == "staging" || $CI_COMMIT_BRANCH == "production"
